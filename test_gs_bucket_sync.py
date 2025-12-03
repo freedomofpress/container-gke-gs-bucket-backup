@@ -1,23 +1,25 @@
 # pylint: disable=missing-module-docstring,missing-class-docstring,missing-function-docstring
 
+import unittest
 import unittest.mock
 from gs_bucket_sync import GCPBucketBackup
 
 
-class TestBucketSync:
-
-    # We can disable this because this is a test class, and test classes are always weird
-    # pylint: disable=attribute-defined-outside-init
-
-    def setup_class(self):
-        self.GENERIC_ARGS = {  # pylint: disable=invalid-name
+GENERIC_ARGS = {
             "src_bucket": "gs://src-bucket/dir/",
             "backup_bucket": "gs://backup-bucket/dir",
             "encrypt_key": "124124213123",
             "filename": "siteapp.tar.gz",
             "gsutil_path": "/usr/local/bin/gsutil",
         }
-        self.gen_backup_obj = GCPBucketBackup(**self.GENERIC_ARGS)
+
+
+class TestBucketSync(unittest.TestCase):
+
+    # We can disable this because this is a test class, and test classes are always weird
+    # pylint: disable=attribute-defined-outside-init
+
+    gen_backup_obj = GCPBucketBackup(**GENERIC_ARGS)
 
     def test_rsync_cmd_cli_str(self):
         """Throw different options against rsync function to determine called command"""
@@ -32,8 +34,8 @@ class TestBucketSync:
                 "rsync",
                 "-r",
                 "-d",
-                self.GENERIC_ARGS["src_bucket"],
-                self.GENERIC_ARGS["backup_bucket"],
+                GENERIC_ARGS["src_bucket"],
+                GENERIC_ARGS["backup_bucket"],
             ]
             assert_call_kws = {"stderr": -2, "shell": False}
             # With dry-run
