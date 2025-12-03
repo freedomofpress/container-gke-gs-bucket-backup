@@ -1,0 +1,80 @@
+---
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    types: ["opened", "synchronize"]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHON_VERSION: '3.13'
+
+jobs:
+  lint-actions:
+    name: Lint:Actions
+    uses: freedomofpress/actionslib/.github/workflows/lint-actions.yaml@main
+
+  lint-containerfile:
+    name: Lint:Containerfile
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Run hadolint
+      uses: hadolint/hadolint-action@v3.3.0
+      with:
+        dockerfile: ./Containerfile
+
+  lint-python:
+    name: Lint:Python
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Configure Poetry
+      uses: freedomofpress/actionslib/act/poetry@main
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        groups: lint
+
+    - name: Run black
+      run: |
+        poetry run black .
+
+    - name: Run pylint
+      run: |
+        poetry run pylint *.py
+
+  test-python:
+    name: Test:Python
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Configure Poetry
+      uses: freedomofpress/actionslib/act/poetry@main
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        groups: lint
+
+    - name: Run tests
+      run: |
+        poetry run python -m unittest discover .
+
+  test-build:
+    name: Test:Build
+    uses: freedomofpress/actionslib/.github/workflows/oci-build.yaml@main
