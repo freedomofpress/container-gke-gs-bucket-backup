@@ -10,8 +10,3 @@ python = "^3.12"
 black = "^25.11.0"
 pylint = "^4.0.4"
 
-
-[project]
-name = "container-gke-gs-bucket-backup"
-dynamic = ["requires-python"]
-dependencies = []
