@@ -14,17 +14,19 @@ jobs:
     name: Prepare
     runs-on: ubuntu-latest
     steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+        sparse-checkout: |
+          Containerfile
+        sparse-checkout-cone-mode: false
+
     - name: Determine tags
       id: tags
-      env:
-        BRANCH: ${{ github.ref_name }}
-        SHA: ${{ github.sha }}
       run: |
-        export TAGS="$BRANCH;$BRANCH-${SHA:0:7}"
-
-        if [ "$BRANCH" = "main" ]; then
-          export TAGS="$TAGS;latest"
-        fi
+        # Extracts the base container image tag out of the containerfile
+        export TAGS=$(cat Containerfile | grep FROM | cut -d ':' -f 2 | cut -d '@' -f 1)
 
         echo "tags=$TAGS" >>$GITHUB_OUTPUT
     outputs:
