@@ -2,14 +2,13 @@
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = "^3.7"
 
-[tool.poetry.group.test.dependencies]
-
-[tool.poetry.group.lint.dependencies]
-black = "^25.11.0"
-pylint = "^4.0.4"
-
+[dependency-groups]
+lint = [
+    "pylint (>=4.0.5,<5.0.0) ; python_version >= \"3.13\" and python_version < \"4.0\"",
+    "black (>=26.5.1,<27.0.0) ; python_version >= \"3.13\" and python_version < \"4.0\""
+]
 
 [project]
 name = "container-gke-gs-bucket-backup"
