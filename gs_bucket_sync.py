@@ -93,7 +93,8 @@ class GCPBucketBackup:
 
     def _cmd_for_log(self, cmd: list[str]) -> str:
         """Return a shell-like command string for readable debug logs."""
-        return self._redact_secret(shlex.join(cmd))
+        rendered = " ".join(shlex.quote(str(part)) for part in cmd)
+        return self._redact_secret(rendered)
 
     def _subprocess_debug_wrap(self, cmd: list[str]) -> str:
         """Run a subprocess command and return combined stdout/stderr.
