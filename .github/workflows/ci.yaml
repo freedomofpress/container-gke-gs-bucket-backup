@@ -11,9 +11,6 @@ permissions:
   contents: read
   actions: read
 
-env:
-  PYTHON_VERSION: '3.13'
-
 jobs:
   lint-actions:
     name: Lint:Actions
@@ -38,14 +35,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v5
+      uses: actions/checkout@v6
       with:
         persist-credentials: false
 
     - name: Configure Poetry
       uses: freedomofpress/actionslib/act/poetry@main
       with:
-        python-version: ${{ env.PYTHON_VERSION }}
+        python-version: '3.13'
         groups: lint
 
     - name: Run black
@@ -56,25 +53,57 @@ jobs:
       run: |
         poetry run pylint *.py
 
+  test-build:
+    name: Test:Build
+    uses: freedomofpress/actionslib/.github/workflows/oci-build.yaml@main
+
   test-python:
     name: Test:Python
     runs-on: ubuntu-latest
+    needs:
+    - test-build
     steps:
+    - name: Install Docker
+      uses: docker/setup-docker-action@v5.1.0
+      with:
+        version: latest
+
+    - name: Download built image
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ needs.test-build.outputs.artifact-name }}
+        path: ${{ runner.temp }}/images
+
+    - name: Restore built image
+      env:
+        LOAD_FILE: ${{ runner.temp }}/images/${{ needs.test-build.outputs.artifact-image }}
+        IMAGE_URL: ${{ needs.test-build.outputs.image-url }}
+      run: |
+        docker image load --input "$LOAD_FILE"
+        docker image tag "$IMAGE_URL" localhost/gke-gs-bucket-backup
+
     - name: Checkout
       uses: actions/checkout@v6
       with:
         persist-credentials: false
 
-    - name: Configure Poetry
-      uses: freedomofpress/actionslib/act/poetry@main
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        groups: lint
-
-    - name: Run tests
+    - name: Run tests in built image
       run: |
-        poetry run python -m unittest discover .
+        docker container create \
+          --name=test-python \
+          --interactive \
+          --tty \
+          --pull=never \
+          --entrypoint=/usr/bin/python3 \
+          --workdir=/usr/local/bin \
+          localhost/gke-gs-bucket-backup \
+          -m unittest discover .
 
-  test-build:
-    name: Test:Build
-    uses: freedomofpress/actionslib/.github/workflows/oci-build.yaml@main
+        docker container cp \
+          ./test_gs_bucket_sync.py \
+          test-python:/usr/local/bin/test_gs_bucket_sync.py
+
+        docker container start \
+          --attach \
+          --interactive \
+          test-python
