@@ -7,7 +7,7 @@ set +x
 status_file="/tmp/backup-status.$$"
 export BACKUP_STATUS_FILE="$status_file"
 
-backup_tmp_dir="
+backup_tmp_dir=""
 
 emit_error() {
   printf 'Backup error %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
