@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
-"""Takes a source bucket, a backup bucket, encryption key as args.
+"""Takes a source bucket and a backup bucket as args.
 
 Will rsync down the source,
 tar those files up,
 and upload the resulting tarball to the backup bucket.
+
+Encryption is configured for gsutil by entrypoint.sh via a private boto config.
+The encryption key is deliberately not passed through Python or subprocess argv.
 
 If you provide a service account key path, script will call out to gcloud to initialize it
 
@@ -25,6 +28,7 @@ import argparse
 import datetime
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -32,12 +36,34 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+_SECRET_PATTERNS = (
+    # In case gsutil somehow ever echoes a config/flag-like value.
+    re.compile(r"(GSUtil:encryption_key=)[^\s'\",]+"),
+    re.compile(r"(encryption_key\s*=\s*)[^\s'\",]+", re.IGNORECASE),
+)
+
+
+def redact_secrets(value: object) -> str:
+    """Redact known encryption-key shapes from log/error text."""
+    rendered = str(value)
+    for pattern in _SECRET_PATTERNS:
+        rendered = pattern.sub(r"\1<redacted>", rendered)
+    return rendered
+
+
+class RedactingFormatter(logging.Formatter):
+    """Formatter that redacts secret-looking values in all log messages."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        return redact_secrets(rendered)
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
-ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+ch.setFormatter(RedactingFormatter("%(levelname)s: %(message)s"))
 logger.addHandler(ch)
 
 
@@ -56,7 +82,16 @@ def print_backup_status(status: str) -> None:
     This intentionally uses stdout and flush=True so container log collectors,
     cron, Kubernetes, ECS, etc. can see it immediately.
     """
-    print(f"{status} {backup_status_timestamp()}", flush=True)
+    line = f"{status} {backup_status_timestamp()}"
+    print(line, flush=True)
+
+    status_file = os.environ.get("BACKUP_STATUS_FILE")
+    if status_file:
+        try:
+            Path(status_file).write_text(f"{line}\n", encoding="utf-8")
+        except OSError:
+            # The wrapper will emit its own error if this file cannot be written.
+            pass
 
 
 class ChattyArgParser(argparse.ArgumentParser):
@@ -75,26 +110,18 @@ class GCPBucketBackup:
         self,
         src_bucket: str,
         backup_bucket: str,
-        encrypt_key: str,
         filename: str,
         gsutil_path: str,
     ) -> None:
         self.src = src_bucket
         self.dst = backup_bucket
-        self.encrypt_key = encrypt_key
         self.gsutil_path = gsutil_path
         self.filename = filename
-
-    def _redact_secret(self, value: str) -> str:
-        """Redact the encryption key from logs/errors if it appears."""
-        if self.encrypt_key:
-            return value.replace(self.encrypt_key, "X" * 10)
-        return value
 
     def _cmd_for_log(self, cmd: list[str]) -> str:
         """Return a shell-like command string for readable debug logs."""
         rendered = " ".join(shlex.quote(str(part)) for part in cmd)
-        return self._redact_secret(rendered)
+        return redact_secrets(rendered)
 
     def _subprocess_debug_wrap(self, cmd: list[str]) -> str:
         """Run a subprocess command and return combined stdout/stderr.
@@ -114,20 +141,19 @@ class GCPBucketBackup:
                 encoding="utf-8",
                 errors="replace",
             )
-        except FileNotFoundError as exc:
-            raise RuntimeError(f"command not found: {self._cmd_for_log(cmd)}") from exc
+        except FileNotFoundError:
+            raise RuntimeError(f"command not found: {self._cmd_for_log(cmd)}") from None
         except subprocess.CalledProcessError as exc:
-            output = exc.stdout or ""
-            output = self._redact_secret(output)
+            output = redact_secrets(exc.stdout or "")
 
             raise RuntimeError(
                 "command failed with status "
                 f"{exc.returncode}: {self._cmd_for_log(cmd)}\n"
                 f"output = {output}"
-            ) from exc
+            ) from None  # suppress the underlying exception chain (e.g not 'from exc')
 
         output = completed.stdout or ""
-        logger.debug("%s", self._redact_secret(output))
+        logger.debug("%s", redact_secrets(output))
 
         return output
 
@@ -146,8 +172,6 @@ class GCPBucketBackup:
         """Copy a local file to a bucket with encryption"""
         gsutil_base_cmd = [
             self.gsutil_path,
-            "-o",
-            f'"GSUtil:encryption_key={self.encrypt_key}"',
             "cp",
             src,
             dst,
@@ -205,7 +229,7 @@ class GCPBucketBackup:
         self.gsutil_encrypt_cp_cmd(upload_file, backup_bucket_path)
 
 
-def build_parser(encryption_key_from_env: str | None) -> ChattyArgParser:
+def build_parser(encryption_configured: bool) -> ChattyArgParser:
     """Build CLI argument parser."""
     default_src = os.environ.get("GS_BACKUP_SRC")
     default_dest = os.environ.get("GS_BACKUP_DEST")
@@ -251,10 +275,11 @@ def build_parser(encryption_key_from_env: str | None) -> ChattyArgParser:
         "--encryption-key-path",
         type=str,
         help=(
-            "File containing key for uploaded object; "
-            "or set GS_ENCRYPTION_KEY to value of key"
+            "File containing key for uploaded object. In the container this is "
+            "consumed by entrypoint.sh before Python starts; or set "
+            "GS_ENCRYPTION_KEY for entrypoint.sh."
         ),
-        required=encryption_key_from_env is None,
+        required=not encryption_configured,
     )
     parser.add_argument(
         "-g",
@@ -283,27 +308,35 @@ def build_parser(encryption_key_from_env: str | None) -> ChattyArgParser:
     return parser
 
 
-def read_encryption_key(parsed_args: argparse.Namespace) -> str:
-    """Load encryption key from env or file."""
-    encryption_key = os.environ.get("GS_ENCRYPTION_KEY")
+def gsutil_encryption_is_configured() -> bool:
+    """Return True if the wrapper or environment has configured gsutil encryption."""
+    return any(
+        os.environ.get(name)
+        for name in (
+            "GSUTIL_ENCRYPTION_CONFIGURED",
+            "BOTO_CONFIG",
+            "BOTO_PATH",
+        )
+    )
 
-    if parsed_args.encryption_key_path is not None:
-        key_path = Path(parsed_args.encryption_key_path)
 
-        try:
-            encryption_key = key_path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise RuntimeError(
-                f"Could not read encryption key from {parsed_args.encryption_key_path}"
-            ) from exc
+def ensure_gsutil_encryption_configured(parsed_args: argparse.Namespace) -> None:
+    """Fail early if gsutil encryption has not been configured safely."""
+    if gsutil_encryption_is_configured():
+        return
 
-    if not encryption_key:
+    if parsed_args.encryption_key_path:
         raise RuntimeError(
-            "No encryption key provided. Set GS_ENCRYPTION_KEY or use "
-            "--encryption-key-path."
+            "--encryption-key-path must be handled by entrypoint.sh so the key "
+            "does not pass through Python argv/subprocess errors. Run the "
+            "container entrypoint or configure BOTO_CONFIG/BOTO_PATH."
         )
 
-    return encryption_key
+    raise RuntimeError(
+        "No gsutil encryption configuration found. Set GS_ENCRYPTION_KEY, pass "
+        "--encryption-key-path to the container entrypoint, or configure "
+        "BOTO_CONFIG/BOTO_PATH."
+    )
 
 
 def run_backup() -> None:
@@ -311,9 +344,9 @@ def run_backup() -> None:
 
     Any exception raised here is caught by main(), which prints Backup error.
     """
-    encryption_key_from_env = os.environ.get("GS_ENCRYPTION_KEY")
+    encryption_configured = gsutil_encryption_is_configured()
 
-    parser = build_parser(encryption_key_from_env)
+    parser = build_parser(encryption_configured)
     parsed_args = parser.parse_args()
 
     if parsed_args.verbose:
@@ -321,12 +354,11 @@ def run_backup() -> None:
 
     logger.debug("ARGS piped in: %s", parsed_args)
 
-    encryption_key = read_encryption_key(parsed_args)
+    ensure_gsutil_encryption_configured(parsed_args)
 
     backup = GCPBucketBackup(
         src_bucket=parsed_args.from_bucket,
         backup_bucket=parsed_args.to_bucket,
-        encrypt_key=encryption_key,
         filename=parsed_args.filename,
         gsutil_path=parsed_args.gsutil,
     )
@@ -363,9 +395,10 @@ def main() -> int:
 
         return code
 
-    except Exception:  # pylint: disable=broad-exception-caught
-        # We *want* to catch broad exceptions of any kind.
-        logger.exception("Backup failed")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # We *want* to catch broad exceptions of any kind, but do not emit a
+        # traceback: chained subprocess tracebacks can include raw argv.
+        logger.error("Backup failed: %s", redact_secrets(exc))
         print_backup_status("Backup error")
         return 1
 
