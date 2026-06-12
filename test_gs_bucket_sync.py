@@ -11,7 +11,6 @@ from gs_bucket_sync import GCPBucketBackup
 GENERIC_ARGS = {
     "src_bucket": "gs://src-bucket/dir/",
     "backup_bucket": "gs://backup-bucket/dir",
-    "encrypt_key": "124124213123",
     "filename": "siteapp.tar.gz",
     "gsutil_path": "/usr/local/bin/gsutil",
 }
