@@ -4,10 +4,45 @@ set +e
 # wrapper writes the private gsutil/boto config.
 set +x
 
-status_file="/tmp/backup-status.$$"
-export BACKUP_STATUS_FILE="$status_file"
-
 backup_tmp_dir=""
+status_file=""
+
+state_parent=""
+
+choose_state_parent() {
+  # Prefer a writable directory that is not the backup workspace.
+  if [ -n "${GS_BACKUP_STATE_DIR:-}" ]; then
+    if [ -d "$GS_BACKUP_STATE_DIR" ] && [ -w "$GS_BACKUP_STATE_DIR" ]; then
+      printf '%s\n' "${GS_BACKUP_STATE_DIR%/}"
+      return 0
+    fi
+
+    printf 'ERROR: GS_BACKUP_STATE_DIR is not writable\n' >&2
+    return 1
+  fi
+
+  if [ -n "${HOME:-}" ] && [ -d "$HOME/.gsutil" ] && [ -w "$HOME/.gsutil" ]; then
+    printf '%s\n' "$HOME/.gsutil"
+    return 0
+  fi
+
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+    printf '%s\n' "${XDG_RUNTIME_DIR%/}"
+    return 0
+  fi
+
+  if [ -d /tmp ] && [ -w /tmp ]; then
+    printf '%s\n' /tmp
+    return 0
+  fi
+
+  printf 'ERROR: No writable runtime directory found for wrapper state\n' >&2
+  return 1
+}
+
+state_parent="$(choose_state_parent)" || exit 1
+status_file="$(mktemp "$state_parent/backup-status.XXXXXX")" || exit 1
+export BACKUP_STATUS_FILE="$status_file"
 
 emit_error() {
   printf 'Backup error %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -76,7 +111,7 @@ configure_gsutil_encryption() {
   fi
 
   if [ -n "$key_value" ]; then
-    backup_tmp_dir="$(mktemp -d /tmp/gcp-bucket-backup.XXXXXX)" || return 1
+    backup_tmp_dir="$(mktemp -d "$state_parent/gcp-bucket-backup.XXXXXX")" || return 1
 
     # Keep the key out of argv, logs, and child process environments. gsutil
     # reads this config file via BOTO_PATH.
@@ -86,6 +121,7 @@ configure_gsutil_encryption() {
       printf '[GSUtil]\n'
       printf 'encryption_key = %s\n' "$key_value"
     } > "$boto_config" || return 1
+    chmod 600 "$boto_config" || return 1
 
     # Use BOTO_PATH rather than BOTO_CONFIG so we do not stomp any existing
     # Cloud SDK/gsutil auth config. Later files override earlier files.
